@@ -103,6 +103,7 @@ class Model:
                                     name='ema_decay')
 
         (
+            self.train_init_pass,
             (self.class_logits_1, self.cons_logits_1),
             (self.class_logits_2, self.cons_logits_2),
             (self.class_logits_ema, self.cons_logits_ema)
@@ -215,7 +216,10 @@ class Model:
             self.train_init_op = tf.variables_initializer(train_init_variables)
 
         self.saver = tf.train.Saver()
-        self.session = tf.Session()
+        #self.session = tf.Session()
+        config = tf.ConfigProto()
+        config.gpu_options.allow_growth = True
+        self.session = tf.Session(config=config)
         self.run(self.init_init_op)
 
     def __setitem__(self, key, value):
@@ -225,7 +229,9 @@ class Model:
         return self.hyper.get(self.session, key)
 
     def train(self, training_batches, evaluation_batches_fn):
-        self.run(self.train_init_op, self.feed_dict(next(training_batches)))
+        feed_dict = self.feed_dict(next(training_batches))
+        self.run(self.train_init_op)
+        self.run(self.train_init_pass, feed_dict)
         LOG.info("Model variables initialized")
         self.evaluate(evaluation_batches_fn)
         self.save_checkpoint()
@@ -333,7 +339,7 @@ def inference(inputs, is_training, ema_decay, input_noise, student_dropout_proba
                       num_logits=num_logits)
 
     with tf.variable_scope("initialization") as var_scope:
-        _ = tower(**tower_args, dropout_probability=student_dropout_probability, is_initialization=True)
+        init_pass = tower(**tower_args, dropout_probability=student_dropout_probability, is_initialization=True)
     with name_variable_scope("primary", var_scope, reuse=True) as (name_scope, _):
         class_logits_1, cons_logits_1 = tower(**tower_args, dropout_probability=student_dropout_probability, name=name_scope)
     with name_variable_scope("secondary", var_scope, reuse=True) as (name_scope, _):
@@ -341,7 +347,7 @@ def inference(inputs, is_training, ema_decay, input_noise, student_dropout_proba
     with ema_variable_scope("ema", var_scope, decay=ema_decay):
         class_logits_ema, cons_logits_ema = tower(**tower_args, dropout_probability=teacher_dropout_probability, name=name_scope)
         class_logits_ema, cons_logits_ema = tf.stop_gradient(class_logits_ema), tf.stop_gradient(cons_logits_ema)
-    return (class_logits_1, cons_logits_1), (class_logits_2, cons_logits_2), (class_logits_ema, cons_logits_ema)
+    return init_pass, (class_logits_1, cons_logits_1), (class_logits_2, cons_logits_2), (class_logits_ema, cons_logits_ema)
 
 
 def tower(inputs,
