@@ -9,7 +9,7 @@ from tensorflow.contrib import metrics, slim
 from tensorflow.contrib.metrics import streaming_mean
 
 from . import nn
-from . import weight_norm as wn
+from . import weight_norm_init as wn
 from .framework import ema_variable_scope, name_variable_scope, assert_shape, HyperparamVariables
 from . import string_utils
 

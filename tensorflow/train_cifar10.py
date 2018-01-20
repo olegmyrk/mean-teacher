@@ -28,7 +28,7 @@ def run():
     LOG.info("Saved tensorboard graph to %r", tensorboard_dir)
 
     cifar = Cifar10ZCA(data_seed, n_labeled)
-    training_batches = minibatching.training_batches(cifar.training)
+    training_batches = minibatching.training_batches(cifar.training, n_labeled_per_batch=50)
     evaluation_batches_fn = minibatching.evaluation_epoch_generator(cifar.evaluation)
 
     model.train(training_batches, evaluation_batches_fn)

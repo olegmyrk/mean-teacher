@@ -24,7 +24,7 @@ def run():
     LOG.info("Saved tensorboard graph to %r", tensorboard_dir)
 
     svhn = SVHN(data_seed, n_labeled, n_extra_unlabeled)
-    training_batches = minibatching.training_batches(svhn.training, n_labeled_per_batch=1)
+    training_batches = minibatching.training_batches(svhn.training, n_labeled_per_batch=50)
     evaluation_batches_fn = minibatching.evaluation_epoch_generator(svhn.evaluation)
 
     model.train(training_batches, evaluation_batches_fn)
