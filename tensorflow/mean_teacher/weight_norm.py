@@ -37,7 +37,7 @@ def fully_connected(inputs, num_outputs,
                                 initializer=tf.constant_initializer(1.), trainable=True)
             b = tf.get_variable('b', shape=[num_outputs], dtype=tf.float32,
                                 initializer=tf.constant_initializer(0.), trainable=True)
-            with tf.control_dependencies([g.assign(g*scale_init), tf.Print(g, [g], "Initializing '" + tf.get_default_graph().get_name_scope() + "'")]):
+            with tf.control_dependencies([g.assign(g*scale_init)]):
                 x_init = tf.reshape(
                     scale_init, [1, num_outputs]) * (x_init - tf.reshape(m_init, [1, num_outputs]))
             if activation_fn is not None:
@@ -111,7 +111,7 @@ def conv2d(inputs, num_outputs,
                                 initializer=tf.constant_initializer(1.), trainable=True)
             b = tf.get_variable('b', shape=[num_outputs], dtype=tf.float32,
                                 initializer=tf.constant_initializer(0.), trainable=True)
-            with tf.control_dependencies([g.assign(g*scale_init), tf.Print(g, [g], "Initializing '" + tf.get_default_graph().get_name_scope() + "'")]):
+            with tf.control_dependencies([g.assign(g*scale_init)]):
                 x_init = (tf.reshape(scale_init, [1, 1, 1, num_outputs]) *
                       (x_init - tf.reshape(m_init, [1, 1, 1, num_outputs])))
 
