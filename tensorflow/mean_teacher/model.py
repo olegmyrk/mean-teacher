@@ -259,6 +259,52 @@ class Model:
         results = self.run(self.metric_values)
         self.validation_log.record(step, results)
         LOG.info("step %5d:   %s", step, self.result_formatter.format_dict(results))
+        LOG.info("step %5d:   eval/class_cost/ensemble=%f", step, self.ensemble_eval(evaluation_batches_fn))
+
+    # begin temporal ensembling evaluation #
+
+    def ensemble_eval(self, evaluation_batches_fn):
+        if not hasattr(self, 'ensemble_eval_probs_result'):
+            self.ensemble_eval_probs_result = self.build_ensemble_eval_probs(self.class_logits_1, self.labels)
+         
+        ensemble_eval_prediction_list = []
+        for batch in evaluation_batches_fn():
+            ensemble_eval_prediction_list.extend(list(self.run(self.ensemble_eval_probs_result, feed_dict=self.feed_dict(batch, is_training=False))))
+
+        if not hasattr(self, 'ensemble_eval_result'):
+            self.ensemble_eval_result = self.build_ensemble_eval(len(ensemble_eval_prediction_list), decay=0.95)
+
+        return self.run(self.ensemble_eval_result, feed_dict={ self.ensemble_eval_predictions_placeholder : ensemble_eval_prediction_list })
+
+    def build_ensemble_eval_probs(self, logits, labels):
+        with tf.variable_scope("ensemble_eval_probs") as scope:
+            applicable = tf.not_equal(labels, -1)
+
+            # Change -1s to zeros to make cross-entropy computable
+            labels = tf.where(applicable, labels, tf.zeros_like(labels))
+
+            # This will now have incorrect values for unlabeled examples
+            per_sample = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.class_logits_1, labels=labels)
+
+            # Retain costs only for labeled
+            per_sample = tf.where(applicable, per_sample, tf.zeros_like(per_sample))
+
+            return tf.exp(-per_sample)
+
+    def build_ensemble_eval(self, eval_sample_count, decay):
+        with tf.variable_scope("ensemble_eval") as scope:
+            self.ensemble_eval_ema = tf.train.ExponentialMovingAverage(decay=decay, zero_debias=True)
+            self.ensemble_eval_predictions_placeholder = tf.placeholder(tf.float32, [eval_sample_count], name='predictions_placeholder') 
+            self.ensemble_eval_predictions_var = tf.get_variable('predictions', [eval_sample_count], tf.float32, tf.constant_initializer(0), trainable=False)
+            self.ensemble_eval_predictions = tf.identity(self.ensemble_eval_predictions_var)
+            self.ensemble_eval_update_op = tf.assign(self.ensemble_eval_predictions_var, self.ensemble_eval_predictions_placeholder)
+            with tf.control_dependencies([self.ensemble_eval_update_op]):
+                self.ensemble_eval_ema_op = self.ensemble_eval_ema.apply([self.ensemble_eval_predictions])
+            self.run(tf.variables_initializer(tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope="ensemble_eval")))
+            with tf.control_dependencies([self.ensemble_eval_ema_op]):
+                return tf.reduce_mean(-tf.log(self.ensemble_eval_ema.average(self.ensemble_eval_predictions)))
+
+    # end temporal ensembling evaluation #
 
     def get_training_control(self):
         return self.session.run(self.training_control)
