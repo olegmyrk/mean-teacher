@@ -43,6 +43,8 @@ class Model:
         'input_noise': 0.15,
         'student_dropout_probability': 0.5,
         'teacher_dropout_probability': 0.5,
+        'regularization_weight' : 1.0,
+        'n_labeled' : 0,
 
         # Training schedule
         'rampup_length': 40000,
@@ -138,7 +140,7 @@ class Model:
                 self.cons_logits_1, self.class_logits_2, self.cons_coefficient, consistency_mask, self.hyper['consistency_trust'])
             self.mean_cons_cost_mt, self.cons_costs_mt = consistency_costs(
                 self.cons_logits_1, self.class_logits_ema, self.cons_coefficient, consistency_mask, self.hyper['consistency_trust'])
-            self.mean_cons_cost_ensemble, self.cons_costs_ensemble = ensemble_classification_costs(self.class_logits_1, consistency_mask, self.ensemble_probs)
+            self.mean_cons_cost_ens, self.cons_costs_ens = ensemble_classification_costs(self.class_logits_1, self.ensemble_probs, self.cons_coefficient, consistency_mask)
 
             def l2_norms(matrix):
                 l2s = tf.reduce_sum(matrix ** 2, axis=1)
@@ -156,19 +158,26 @@ class Model:
                 self.class_costs_1, self.cons_costs_pi, self.res_costs_1)
             self.mean_total_cost_mt, self.total_costs_mt = total_costs(
                 self.class_costs_1, self.cons_costs_mt, self.res_costs_1)
-            self.mean_total_cost_ensemble, self.total_costs_ensemble = total_costs(
-                self.class_costs_1, self.cons_costs_ensemble, self.res_costs_1)
+            self.mean_total_cost_ens, self.total_costs_ens = total_costs(
+                self.class_costs_1, self.cons_costs_ens, self.res_costs_1)
+            self.mean_total_cost_vanilla, self.total_costs_vanilla = total_costs(
+                self.class_costs_1, self.res_costs_1)
 
-            self.cost_to_be_minimized = tf.cond(tf.equal(self.hyper['ema_consistency'],1),
-                                                lambda: self.mean_total_cost_mt,
-                                                lambda: tf.cond(tf.equal(self.hyper['ema_consistency'],0),
-                                                    lambda: self.mean_total_cost_pi,
+            self.cost_to_be_minimized = tf.cond(tf.equal(self.hyper['ema_consistency'],0),
+                                                lambda: self.mean_total_cost_pi,
+                                                lambda: tf.cond(tf.equal(self.hyper['ema_consistency'],1),
+                                                    lambda: self.mean_total_cost_mt,
                                                     lambda: tf.cond(tf.equal(self.hyper['ema_consistency'],2),
-                                                        lambda: self.mean_total_cost_ensemble,
-                                                        lambda: tf.constant(0.0)
+                                                        lambda: self.mean_total_cost_ens,
+                                                        lambda: self.mean_total_cost_vanilla 
                                                         )
                                                     )
                                                 )
+
+            self.labels_in_batch = tf.reduce_sum(tf.cast(tf.not_equal(self.labels, -1),dtype=tf.int32), name="labels_in_batch")
+            self.batch_ratio = tf.cast(self.labels_in_batch,dtype=tf.float32) / tf.cast(self.hyper['n_labeled'],dtype=tf.float32)
+            self.regularization_cost = self.batch_ratio * self.hyper['regularization_weight'] * tf.losses.get_regularization_loss()
+            self.cost_to_be_minimized = self.cost_to_be_minimized + self.regularization_cost 
 
         with tf.name_scope("train_step"):
             update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
@@ -197,7 +206,8 @@ class Model:
             "train/class_cost/ema": self.mean_class_cost_ema,
             "train/cons_cost/pi": self.mean_cons_cost_pi,
             "train/cons_cost/mt": self.mean_cons_cost_mt,
-            "train/cons_cost/ensemble": self.mean_cons_cost_ensemble,
+            "train/cons_cost/ens": self.mean_cons_cost_ens,
+            "train/reg_cost" : self.regularization_cost,
             "train/res_cost/1": self.mean_res_cost_1,
             "train/res_cost/ema": self.mean_res_cost_ema,
             "train/total_cost/pi": self.mean_total_cost_pi,
@@ -217,7 +227,7 @@ class Model:
             self.metric_init_op = tf.variables_initializer(metric_variables)
 
         self.result_formatter = string_utils.DictFormatter(
-            order=["eval/error/ema", "error/1", "class_cost/1", "cons_cost/mt", "cons_cost/pi", "cons_cost/ensemble"],
+            order=["eval/error/ema", "eval/class_cost/ema", "error/1", "class_cost/1", "cons_cost/mt", "cons_cost/pi", "cons_cost/ens", "reg_cost"],
             default_format='{name}: {value:>10.6f}',
             separator=",  ")
         self.result_formatter.add_format('error', '{name}: {value:>6.1%}')
@@ -251,32 +261,37 @@ class Model:
         self.evaluate(evaluation_batches_fn)
         self.save_checkpoint()
 
+        # begin temporal ensembling training #
         ensemble_ema_probs = {}
         ensemble_ema_counts = {}
-        
         ensemble_ema_decay = self.run(self.ema_decay)
+        # end temporal ensembling training #
 
         for batch in training_batches:
             # begin temporal ensembling training #
-
             batch_sample_ids = batch['sample_id']
+            batch_labels = batch['y']
             batch_ensemble_probs = np.zeros((len(batch_sample_ids), 10), np.float32)
+
             for (batch_sample_id, batch_sample_idx) in zip(batch_sample_ids, range(len(batch_sample_ids))):
                 if batch_sample_id in ensemble_ema_counts:
                     batch_ensemble_probs[batch_sample_idx, :] = ensemble_ema_probs[batch_sample_id] / (1 - ensemble_ema_decay ** ensemble_ema_counts[batch_sample_id])
+            # end temporal ensembling training #
 
             batch_result_probs, results, _ = self.run([self.class_probs_1, self.training_metrics, self.train_step_op],
-                            self.feed_dict(batch, extra = { self.ensemble_probs : batch_ensemble_probs }))
+                    self.feed_dict(batch, extra = { self.ensemble_probs : batch_ensemble_probs }))
 
+            # begin temporal ensembling training #
             for (batch_sample_id, batch_sample_idx) in zip(batch_sample_ids, range(len(batch_sample_ids))):
+                if batch_labels[batch_sample_idx] != -1:
+                    continue
                 if batch_sample_id in ensemble_ema_counts:
                     ensemble_ema_probs[batch_sample_id] = ensemble_ema_decay * ensemble_ema_probs[batch_sample_id] + (1 - ensemble_ema_decay) * batch_result_probs[batch_sample_idx, :]
                     ensemble_ema_counts[batch_sample_id] += 1
                 else:
                     ensemble_ema_probs[batch_sample_id] = (1 - ensemble_ema_decay) * batch_result_probs[batch_sample_idx, :]
                     ensemble_ema_counts[batch_sample_id] = 1
-
-            # begin temporal ensembling training #
+            # end temporal ensembling training #
 
             step_control = self.get_training_control()
             self.training_log.record(step_control['step'], {**results, **step_control})
@@ -312,7 +327,7 @@ class Model:
             ensemble_eval_prediction_list.extend(list(self.run(self.ensemble_eval_probs_result, feed_dict=self.feed_dict(batch, is_training=False))))
 
         if not hasattr(self, 'ensemble_eval_result'):
-            self.ensemble_eval_result = self.build_ensemble_eval(len(ensemble_eval_prediction_list), decay=0.95)
+            self.ensemble_eval_result = self.build_ensemble_eval(len(ensemble_eval_prediction_list), decay=self.ema_decay)
 
         return self.run(self.ensemble_eval_result, feed_dict={ self.ensemble_eval_predictions_placeholder : ensemble_eval_prediction_list })
 
@@ -545,17 +560,26 @@ def errors(logits, labels, name=None):
         return mean, per_sample
 
 
-def ensemble_classification_costs(logits, mask, ensemble_probs, name=None):
+def ensemble_classification_costs(logits, ensemble_probs, cons_coefficient, mask, name=None):
+    num_classes = 10
     with tf.name_scope(name, "ensemble_classification_costs") as scope:
-        probs = tf.where(mask, ensemble_probs, tf.zeros_like(ensemble_probs)) 
-        per_sample = tf.nn.softmax_cross_entropy_with_logits(labels=probs, logits=logits)
+        full_mask = tf.logical_and(mask, tf.not_equal(tf.reduce_sum(ensemble_probs),0))
+        target_probs = tf.where(full_mask, ensemble_probs, tf.zeros_like(ensemble_probs))
+
+        #kl_cost_multiplier = 2 * (1 - 1/num_classes) / num_classes**2
+        #costs = tf.nn.softmax_cross_entropy_with_logits(labels=target_probs, logits=logits) * kl_cost_multiplier
+        costs = tf.reduce_mean((target_probs - tf.nn.softmax(logits)) ** 2, -1)
 
         # Take mean over all examples, not just labeled examples.
-        labeled_sum = tf.reduce_sum(per_sample)
-        total_count = tf.to_float(tf.shape(per_sample)[0])
-        mean = tf.div(labeled_sum, total_count, name=scope)
+        costs = costs * tf.to_float(full_mask) * cons_coefficient
+        labeled_sum = tf.reduce_sum(costs)
+        total_count = tf.to_float(tf.shape(costs)[0])
+        mean_cost = tf.div(labeled_sum, total_count, name=scope)
 
-        return mean, per_sample
+        assert_shape(costs, [None])
+        assert_shape(mean_cost, [])
+
+        return mean_cost, costs 
 
 def classification_costs(logits, labels, name=None):
     """Compute classification cost mean and classification cost per sample
