@@ -21,12 +21,14 @@ class Datafile:
     def _load(self):
         data = np.zeros(self.n_examples, dtype=[
             ('x', np.uint8, (32, 32, 3)),
-            ('y', np.int32, ())  # We will be using -1 for unlabeled
+            ('y', np.int32, ()),  # We will be using -1 for unlabeled
+            ('sample_id', np.int32, ())
         ])
         dictionary = scipy.io.loadmat(self.path)
         data['x'] = np.transpose(dictionary['X'], [3, 0, 1, 2])
         data['y'] = dictionary['y'].reshape((-1))
         data['y'][data['y'] == 10] = 0  # Use label 0 for zeros
+        data['sample_id'] = np.arange(self.n_examples)
         self._data = data
 
 
