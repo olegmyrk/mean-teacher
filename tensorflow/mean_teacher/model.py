@@ -13,7 +13,7 @@ from tensorflow.contrib.metrics import streaming_mean
 import tensorflow.contrib.kfac
 
 from . import nn
-from . import weight_norm as wn
+from . import weight_norm_no_batchnorm as wn
 from .framework import ema_variable_scope, name_variable_scope, assert_shape, HyperparamVariables
 from . import string_utils
 
