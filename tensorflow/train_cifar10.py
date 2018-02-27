@@ -23,6 +23,9 @@ def run():
     model['normalize_input'] = False  # Keep ZCA information
     model['rampdown_length'] = 25000
     model['training_length'] = 150000
+    model['kfac_inv_update_span'] = 10
+    model['print_span'] = 1
+    model['evaluation_span'] = 100
 
     tensorboard_dir = model.save_tensorboard_graph()
     LOG.info("Saved tensorboard graph to %r", tensorboard_dir)

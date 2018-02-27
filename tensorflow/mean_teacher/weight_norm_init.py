@@ -14,7 +14,7 @@ from tensorflow.contrib.framework.python.ops import add_arg_scope
 @add_arg_scope
 def fully_connected(inputs, num_outputs,
                     activation_fn=None, init_scale=1., init=False,
-                    eval_mean_ema_decay=0.999, is_training=None, scope=None, layer_collection=None):
+                    eval_mean_ema_decay=0.999, is_training=None, scope=None, layer_collection=None, reuse=None):
     #pylint: disable=invalid-name
     with tf.variable_scope(scope, "fully_connected"):
         if is_training is None:
@@ -50,7 +50,8 @@ def fully_connected(inputs, num_outputs,
                 activations = preactivations
 
             if layer_collection is not None:
-              layer_collection.register_fully_connected(V, inputs, preactivations) 
+              #layer_collection.register_fully_connected((V,b), inputs, preactivations, reuse=reuse) 
+              layer_collection.register_fully_connected(V, inputs, preactivations, reuse=reuse) 
 
             return activations
 
@@ -59,7 +60,7 @@ def fully_connected(inputs, num_outputs,
 def conv2d(inputs, num_outputs,
            kernel_size=[3, 3], stride=[1, 1], padding='SAME',
            activation_fn=None, init_scale=1., init=False,
-           eval_mean_ema_decay=0.999, is_training=None, scope=None, layer_collection=None):
+           eval_mean_ema_decay=0.999, is_training=None, scope=None, layer_collection=None, reuse=None):
     #pylint: disable=invalid-name
     with tf.variable_scope(scope, "conv2d"):
         if is_training is None:
@@ -96,6 +97,7 @@ def conv2d(inputs, num_outputs,
                 activations = activations
 
             if layer_collection is not None:
-              layer_collection.register_conv2d(V, [1] + stride + [1], padding, inputs, preactivations) 
+              #layer_collection.register_conv2d((V,b), tuple([1] + stride + [1]), padding, inputs, preactivations, reuse=reuse) 
+              layer_collection.register_conv2d(V, tuple([1] + stride + [1]), padding, inputs, preactivations, reuse=reuse) 
 
             return activations

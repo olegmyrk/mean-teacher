@@ -10,8 +10,10 @@ import tensorflow as tf
 from tensorflow.contrib import metrics, slim
 from tensorflow.contrib.metrics import streaming_mean
 
+import tensorflow.contrib.kfac
+
 from . import nn
-from . import weight_norm_init as wn
+from . import weight_norm as wn
 from .framework import ema_variable_scope, name_variable_scope, assert_shape, HyperparamVariables
 from . import string_utils
 
@@ -62,10 +64,16 @@ class Model:
         # Output schedule
         'print_span': 20,
         'evaluation_span': 500,
+
+        # KFAC parameters 
+        'kfac_inv_update_span' : 100,
+        'kfac_noise_learning_factor' : 0.0,
+        'kfac_damping' : 0.001,
+        'kfac_norm_constraint' : 0.0001
     }
 
     #pylint: disable=too-many-instance-attributes
-    def __init__(self, run_context=None):
+    def __init__(self, run_context=None, kfac_sampling_type = None):
         if run_context is not None:
             self.training_log = run_context.create_train_log('training')
             self.validation_log = run_context.create_train_log('validation')
@@ -107,6 +115,7 @@ class Model:
                                     step_rampup_value * self.hyper['ema_decay_after_rampup'],
                                     name='ema_decay')
 
+        layer_collection = tensorflow.contrib.kfac.layer_collection.LayerCollection()
         (
             self.train_init_pass,
             (self.class_logits_1, self.cons_logits_1),
@@ -114,6 +123,7 @@ class Model:
             (self.class_logits_ema, self.cons_logits_ema)
         ) = inference(
             self.images,
+            layer_collection=layer_collection,
             is_training=self.is_training,
             ema_decay=self.ema_decay,
             input_noise=self.hyper['input_noise'],
@@ -123,6 +133,8 @@ class Model:
             flip_horizontally=self.hyper['flip_horizontally'],
             translate=self.hyper['translate'],
             num_logits=self.hyper['num_logits'])
+
+        layer_collection.register_categorical_predictive_distribution(self.class_logits_1, name="class_logits_1")
 
         with tf.name_scope("objectives"):
             self.mean_error_1, self.errors_1 = errors(self.class_logits_1, self.labels)
@@ -182,12 +194,48 @@ class Model:
         with tf.name_scope("train_step"):
             update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
             with tf.control_dependencies(update_ops):
-                self.train_step_op = nn.adam_optimizer(self.cost_to_be_minimized,
-                                                       self.global_step,
-                                                       learning_rate=self.learning_rate,
-                                                       beta1=self.adam_beta_1,
-                                                       beta2=self.adam_beta_2,
-                                                       epsilon=self.hyper['adam_epsilon'])
+                #self.train_step_op = nn.adam_optimizer(self.cost_to_be_minimized,
+                #                                       self.global_step,
+                #                                       learning_rate=self.learning_rate,
+                #                                       beta1=self.adam_beta_1,
+                #                                       beta2=self.adam_beta_2,
+                #                                       epsilon=self.hyper['adam_epsilon'])
+                
+                # Kfac must always compute eigen-decomposition 
+                tensorflow.contrib.kfac.fisher_factors.set_global_constants(eigenvalue_decomposition_threshold=0)
+
+                self.labels_in_batch = tf.reduce_sum(tf.cast(tf.not_equal(self.labels, -1),dtype=tf.int32), name="labels_in_batch")
+                self.momentum = self.adam_beta_1
+                self.cov_ema_decay = self.adam_beta_2
+                
+                self.batch_ratio = tf.cast(self.labels_in_batch,dtype=tf.float32) / tf.cast(self.hyper['kfac_n_labeled'],dtype=tf.float32)
+                self.noise_learning_scale = self.hyper['kfac_noise_learning_factor'] * self.batch_ratio 
+
+                from . import natural_gradient_optimizer
+                optimizer = natural_gradient_optimizer.NaturalGradientOptimizer(
+                                      var_list = layer_collection.registered_variables,
+                                      main_learning_rate=self.learning_rate, #0.0001,
+                                      noise_learning_scale=self.noise_learning_scale, #0.0001*50/512,
+                                      cov_ema_decay=self.cov_ema_decay,#0.99,#0.95,
+                                      damping=self.hyper['kfac_damping'],#0.001,#1.0,
+                                      norm_constraint=self.hyper['kfac_norm_constraint'],#0.0001,#None,#0.00001,
+                                      layer_collection=layer_collection,
+                                      sampling_type=kfac_sampling_type,#'sghmc',
+                                      momentum=self.momentum #0.9
+                                      )
+
+                #self.regularization = tf.contrib.layers.apply_regularization(tf.contrib.layers.l2_regularizer(1.0), [W for [W,b] in layer_collection.fisher_blocks.keys()])
+                self.regularization = tf.contrib.layers.apply_regularization(tf.contrib.layers.l2_regularizer(1.0), [V for V in layer_collection.fisher_blocks.keys()])
+                self.cost_to_be_minimized = self.cost_to_be_minimized + self.hyper['regularization_weight'] * self.regularization * self.batch_ratio
+ 
+                # Preparing operations
+                self.cov_update_op = tf.group(tf.Print(self.global_step,[self.global_step],"Update KFAC COV"), optimizer.cov_update_op)
+                self.inv_update_op = tf.group(tf.Print(self.global_step,[self.global_step],"Inverting KFAC FM"), optimizer.inv_update_op)
+                with tf.control_dependencies([tf.Print(self.global_step, [self.learning_rate, self.noise_learning_scale], "Learning rates: "), tf.Print(self.global_step, [self.momentum], "Momentum: "), tf.Print(self.global_step, [self.cov_ema_decay], "Cov ema decay: ")]):
+                    self.train_step_op = optimizer.minimize(
+                                           self.cost_to_be_minimized, 
+                                           global_step=self.global_step
+                                       )
 
         self.training_control = training_control(self.global_step,
                                                  self.hyper['print_span'],
@@ -268,6 +316,7 @@ class Model:
         # end temporal ensembling training #
 
         for batch in training_batches:
+<<<<<<< Updated upstream
             # begin temporal ensembling training #
             batch_sample_ids = batch['sample_id']
             batch_labels = batch['y']
@@ -278,7 +327,7 @@ class Model:
                     batch_ensemble_probs[batch_sample_idx, :] = ensemble_ema_probs[batch_sample_id] / (1 - ensemble_ema_decay ** ensemble_ema_counts[batch_sample_id])
             # end temporal ensembling training #
 
-            batch_result_probs, results, _ = self.run([self.class_probs_1, self.training_metrics, self.train_step_op],
+            batch_result_probs, results, _, _  = self.run([self.class_probs_1, self.training_metrics, self.train_step_op, self.cov_update_op],
                     self.feed_dict(batch, extra = { self.ensemble_probs : batch_ensemble_probs }))
 
             # begin temporal ensembling training #
@@ -294,6 +343,8 @@ class Model:
             # end temporal ensembling training #
 
             step_control = self.get_training_control()
+            if step_control['step'] % self.run([self.hyper['kfac_inv_update_span']])[0] == 0:
+                self.run([self.inv_update_op])
             self.training_log.record(step_control['step'], {**results, **step_control})
             if step_control['time_to_print']:
                 LOG.info("step %5d:   %s", step_control['step'], self.result_formatter.format_dict(results))
@@ -432,7 +483,7 @@ def sigmoid_rampdown(global_step, rampdown_length, training_length):
 
 
 def inference(inputs, is_training, ema_decay, input_noise, student_dropout_probability, teacher_dropout_probability,
-              normalize_input, flip_horizontally, translate, num_logits):
+              normalize_input, flip_horizontally, translate, num_logits, layer_collection=None):
     tower_args = dict(inputs=inputs,
                       is_training=is_training,
                       input_noise=input_noise,
@@ -444,7 +495,7 @@ def inference(inputs, is_training, ema_decay, input_noise, student_dropout_proba
     with tf.variable_scope("initialization") as var_scope:
         init_pass = tower(**tower_args, dropout_probability=student_dropout_probability, is_initialization=True)
     with name_variable_scope("primary", var_scope, reuse=True) as (name_scope, _):
-        class_logits_1, cons_logits_1 = tower(**tower_args, dropout_probability=student_dropout_probability, name=name_scope)
+        class_logits_1, cons_logits_1 = tower(**tower_args, dropout_probability=student_dropout_probability, name=name_scope, layer_collection=layer_collection)
     with name_variable_scope("secondary", var_scope, reuse=True) as (name_scope, _):
         class_logits_2, cons_logits_2 = tower(**tower_args, dropout_probability=teacher_dropout_probability, name=name_scope)
     with ema_variable_scope("ema", var_scope, decay=ema_decay):
@@ -461,6 +512,7 @@ def tower(inputs,
           flip_horizontally,
           translate,
           num_logits,
+          layer_collection=None,
           is_initialization=False,
           name=None):
     with tf.name_scope(name, "tower"):
@@ -468,6 +520,7 @@ def tower(inputs,
             padding='SAME',
             kernel_size=[3, 3],
             activation_fn=nn.lrelu,
+            layer_collection=layer_collection,
             init=is_initialization
         )
         training_mode_funcs = [
@@ -526,8 +579,8 @@ def tower(inputs,
             net = slim.flatten(net)
             assert_shape(net, [None, 128])
 
-            primary_logits = wn.fully_connected(net, 10, init=is_initialization)
-            secondary_logits = wn.fully_connected(net, 10, init=is_initialization)
+            primary_logits = wn.fully_connected(net, 10, init=is_initialization, layer_collection=layer_collection)
+            secondary_logits = primary_logits#wn.fully_connected(net, 10, init=is_initialization)
 
             with tf.control_dependencies([tf.assert_greater_equal(num_logits, 1),
                                           tf.assert_less_equal(num_logits, 2)]):
